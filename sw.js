@@ -1,5 +1,5 @@
 // Bump this when you change index.html so phones pick up the new version.
-const CACHE = "daily-three-v1";
+const CACHE = "daily-three-v2";
 const SHELL = ["./", "index.html", "manifest.json", "icon-192.png", "icon-512.png", "icon-192-maskable.png", "icon-512-maskable.png"];
 
 self.addEventListener("install", e => {

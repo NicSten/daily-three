@@ -88,6 +88,19 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
 .opt{display:block;width:100%;text-align:left;font:inherit;padding:12px;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--ink);margin-bottom:8px;cursor:pointer}
 .row{display:flex;gap:8px;margin-top:10px}
 .row input{flex:1;font:inherit;padding:10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink)}
+.plan{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:10px}
+.plan h3{font-size:1.1rem;margin-bottom:4px}
+.prow{display:grid;grid-template-columns:5.5rem 1fr;gap:8px;width:100%;text-align:left;font:inherit;background:none;border:0;border-top:1px solid var(--line);padding:8px 0;color:var(--ink);cursor:pointer}
+.plan .prow:first-of-type{border-top:0}
+.prow .lbl{font-size:.85rem;color:var(--muted)}
+.prow .val.empty{color:var(--muted);font-style:italic}
+.rep{font-size:.8rem;color:var(--muted);margin-left:6px}
+.rule{display:flex;gap:8px;align-items:center;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:8px}
+.rule .txt{flex:1;min-width:0}
+.rule .txt small{display:block;color:var(--muted)}
+.rule input{width:3.2rem;font:inherit;padding:6px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--ink);text-align:center}
+.repeatrow{display:flex;gap:8px;align-items:center;margin:4px 0 12px;font-size:.95rem}
+.repeatrow select{font:inherit;padding:8px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink)}
 .toast{position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:8px 14px;border-radius:8px;font-size:.9rem;display:none;z-index:9}
 </style>
 </head>
@@ -107,6 +120,13 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
   <div class="grid" id="grid" aria-label="Tasks done per day, last 28 days"></div>
   <p class="legend">Brighter square means more of the three got done. Outlined square is today.</p>
 
+  <h2>Plan ahead</h2>
+  <p class="note">Tap any slot to pick a task for that day or set it to repeat.</p>
+  <div id="plan"></div>
+
+  <h2>Repeating tasks</h2>
+  <div id="rules"></div>
+
   <h2>Edit task lists</h2>
   <div class="tabs" role="tablist" id="tabs"></div>
   <div class="ed" id="editor"></div>
@@ -124,12 +144,28 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
 <div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
   <div class="card">
     <h2 id="sheetTitle" style="margin-top:0">Pick a task</h2>
+    <div class="repeatrow">
+      <label for="repeatSel">Repeat</label>
+      <select id="repeatSel">
+        <option value="0">Just this day</option>
+        <option value="1">Every day</option>
+        <option value="2">Every 2 days</option>
+        <option value="3">Every 3 days</option>
+        <option value="4">Every 4 days</option>
+        <option value="5">Every 5 days</option>
+        <option value="7">Every week</option>
+        <option value="14">Every 2 weeks</option>
+      </select>
+    </div>
     <div id="opts"></div>
     <div class="row">
       <input id="custom" placeholder="Or type your own">
       <button class="btn" id="useCustom">Use</button>
     </div>
-    <button class="link" id="closeSheet" style="margin-top:14px">Cancel</button>
+    <div class="acts" style="margin-top:14px">
+      <button class="link" id="clearSlot">Leave this day empty</button>
+      <button class="link" id="closeSheet">Cancel</button>
+    </div>
   </div>
 </div>
 <div class="toast" id="toast"></div>
@@ -176,8 +212,10 @@ function store(k,v){ try{ localStorage.setItem(k,JSON.stringify(v)); }catch(e){ 
 
 let menus = load("d3-menus", clone(DEFAULT_MENUS));
 let days  = load("d3-days", {});
+let repeats = load("d3-repeats", []);   // [{id, slot, task, every, start}] newest first
+const saveRepeats = () => store("d3-repeats", repeats);
 let editing = "eveBig";
-let pickingSlot = null;
+let pickingSlot = null, pickingDay = null;
 
 const saveMenus = () => store("d3-menus", menus);
 const saveDays  = () => store("d3-days", days);
@@ -185,6 +223,21 @@ const saveDays  = () => store("d3-days", days);
 const pad = n => String(n).padStart(2,"0");
 const keyOf = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
 const todayKey = () => keyOf(new Date());
+const dayNum = k => { const [y,m,d]=k.split("-").map(Number); return Math.round(Date.UTC(y,m-1,d)/864e5); };
+const addDays = (k,n) => { const [y,m,d]=k.split("-").map(Number); return keyOf(new Date(y,m-1,d+n)); };
+const niceDate = (k,opts={weekday:"short",month:"short",day:"numeric"}) => { const [y,m,d]=k.split("-").map(Number); return new Date(y,m-1,d).toLocaleDateString(undefined,opts); };
+function ruleFor(k, slot){
+  const n=dayNum(k);
+  return repeats.find(r=>r.slot===slot && n>=dayNum(r.start) && (n-dayNum(r.start))%r.every===0) || null;
+}
+// What task shows in a slot on a day: a one-off pick wins, then a repeat, unless the day was cleared.
+function effective(k, slot){
+  const d=(days[k]||{})[slot]||{};
+  if(d.task) return {task:d.task, done:!!d.done, rule:null};
+  if(d.skip) return {task:"", done:!!d.done, rule:null};
+  const r=ruleFor(k,slot);
+  return {task:r?r.task:"", done:!!d.done, rule:r};
+}
 const $ = id => document.getElementById(id);
 const el = (tag, props={}, kids=[]) => { const e=Object.assign(document.createElement(tag), props); kids.forEach(k=>e.append(k)); return e; };
 
@@ -193,28 +246,30 @@ function toast(msg){ const t=$("toast"); t.textContent=msg; t.style.display="blo
 /* ---------- today ---------- */
 function renderToday(){
   $("date").textContent = new Date().toLocaleDateString(undefined,{weekday:"long",month:"long",day:"numeric"});
-  const t = days[todayKey()] || {};
+  const tk = todayKey();
   const box = $("slots"); box.innerHTML = "";
   SLOTS.forEach(s=>{
-    const v = t[s.key] || {};
-    const pick = el("button",{className:"link",textContent:v.task?"Change":"Pick one",onclick:()=>openSheet(s)});
+    const v = effective(tk, s.key);
+    const pick = el("button",{className:"link",textContent:v.task?"Change":"Pick one",onclick:()=>openSheet(s, tk)});
     const rnd  = el("button",{className:"link",textContent:"Surprise me",onclick:()=>{
       const all = menus[s.menu].flatMap(c=>c.tasks).filter(Boolean);
-      if(all.length) setTask(s.key, all[Math.floor(Math.random()*all.length)]);
+      if(all.length) setTask(s.key, all[Math.floor(Math.random()*all.length)], tk, 0);
     }});
     const br = el("button",{className:"breaker",innerHTML:'<span class="t">Complete</span><span class="b">Not</span>',onclick:()=>toggleDone(s.key)});
+    const taskEl = el("div",{className:"task"+(v.task?"":" empty"),textContent:v.task||"Not picked yet"});
+    if(v.rule) taskEl.append(el("span",{className:"rep",textContent:`↻ every ${v.rule.every===1?"day":v.rule.every+" days"}`}));
     br.setAttribute("aria-pressed", v.done?"true":"false");
     br.setAttribute("aria-label", `${s.when} task complete`);
     box.append(el("div",{className:"slot"+(s.size==="big"?" big":"")},[
       el("div",{},[
         el("div",{className:"when",textContent:s.when}),
-        el("div",{className:"task"+(v.task?"":" empty"),textContent:v.task||"Not picked yet"}),
+        taskEl,
         el("div",{className:"acts"},[pick,rnd])
       ]),
       el("div",{className:"bw"},[br])
     ]));
   });
-  renderHistory();
+  renderHistory(); renderPlan(); renderRules();
 }
 const countDone = d => d ? SLOTS.filter(s=>d[s.key]&&d[s.key].done).length : 0;
 function renderHistory(){
@@ -232,27 +287,87 @@ function renderHistory(){
   while(countDone(days[keyOf(d)])===3){ streak++; d.setDate(d.getDate()-1); }
   $("streak").textContent=streak;
 }
-function ensureToday(){ const k=todayKey(); days[k]=days[k]||{}; return k; }
-function setTask(slot, task){ const k=ensureToday(); days[k][slot]={task, done:(days[k][slot]||{}).done||false}; saveDays(); renderToday(); }
-function toggleDone(slot){ const k=ensureToday(); const c=days[k][slot]||{task:""}; days[k][slot]={task:c.task||"",done:!c.done}; saveDays(); renderToday(); }
+function ensureDay(k){ days[k]=days[k]||{}; return days[k]; }
+function setTask(slot, task, k, every){
+  const day=ensureDay(k); const done=(day[slot]||{}).done||false;
+  if(every>0){
+    // Drop any older repeat for this slot that starts on or after this day, then add the new one.
+    repeats = repeats.filter(r=>!(r.slot===slot && dayNum(r.start)>=dayNum(k)));
+    repeats.unshift({id:Date.now().toString(36), slot, task, every, start:k});
+    day[slot]={task:"", done}; saveRepeats();
+  } else {
+    day[slot]={task, done};
+  }
+  saveDays(); renderToday();
+}
+function clearSlot(slot, k){ const day=ensureDay(k); day[slot]={task:"", skip:true, done:false}; saveDays(); renderToday(); }
+function toggleDone(slot){
+  const k=todayKey(); const v=effective(k,slot); const day=ensureDay(k);
+  day[slot]={...(day[slot]||{}), task:(day[slot]||{}).task||"", done:!v.done};
+  if(v.rule) day[slot].doneTask=v.task;
+  saveDays(); renderToday();
+}
+
+/* ---------- plan ahead ---------- */
+function renderPlan(){
+  const box=$("plan"); box.innerHTML="";
+  for(let i=1;i<=7;i++){
+    const k=addDays(todayKey(),i);
+    const card=el("div",{className:"plan"},[el("h3",{textContent:i===1?`Tomorrow, ${niceDate(k,{weekday:"short"})}`:niceDate(k)})]);
+    SLOTS.forEach(s=>{
+      const v=effective(k,s.key);
+      const val=el("span",{className:"val"+(v.task?"":" empty"),textContent:v.task||"Open"});
+      if(v.rule) val.append(el("span",{className:"rep",textContent:"↻"}));
+      card.append(el("button",{className:"prow",onclick:()=>openSheet(s,k)},[el("span",{className:"lbl",textContent:s.when.replace(", big one"," big").replace(", small one"," small")}),val]));
+    });
+    box.append(card);
+  }
+}
+function renderRules(){
+  const box=$("rules"); box.innerHTML="";
+  if(!repeats.length){ box.append(el("p",{className:"note",textContent:"None yet. When you pick a task, choose how often it repeats."})); return; }
+  repeats.forEach((r,i)=>{
+    const slot=SLOTS.find(s=>s.key===r.slot);
+    const every=el("input",{type:"number",min:1,max:60,value:r.every,onchange:e=>{
+      const n=Math.max(1,Math.min(60,parseInt(e.target.value)||1)); r.every=n; saveRepeats(); renderToday();
+    }});
+    every.setAttribute("aria-label","Repeat every how many days");
+    box.append(el("div",{className:"rule"},[
+      el("div",{className:"txt"},[document.createTextNode(r.task), el("small",{textContent:`${slot?slot.when:""}, starting ${niceDate(r.start)}`})]),
+      el("span",{className:"note",textContent:"every"}), every, el("span",{className:"note",textContent:"days"}),
+      el("button",{className:"icon del",textContent:"✕",title:"Stop repeating",onclick:()=>{
+        if(confirm(`Stop repeating "${r.task}"? Days you already completed stay in your history.`)){
+          // Keep past completions: copy the task onto past days that were done.
+          const today=dayNum(todayKey());
+          for(const k in days){ const d=days[k][r.slot]; if(d&&d.done&&!d.task&&dayNum(k)<=today&&ruleFor(k,r.slot)===r) d.task=r.task; }
+          repeats.splice(i,1); saveRepeats(); saveDays(); renderToday();
+        }
+      }})
+    ]));
+  });
+}
 
 /* ---------- picker ---------- */
-function openSheet(s){
-  pickingSlot=s;
-  $("sheetTitle").textContent = s.size==="big" ? "Pick tonight's big task" : "Pick a small task";
+function openSheet(s, k){
+  pickingSlot=s; pickingDay=k;
+  const when = k===todayKey() ? "today" : niceDate(k,{weekday:"long",month:"short",day:"numeric"});
+  $("sheetTitle").textContent = `${s.when} ${s.size==="big"?"big task":"task"}, ${when}`;
+  $("repeatSel").value="0";
+  $("clearSlot").style.display = effective(k,s.key).task ? "" : "none";
   const o=$("opts"); o.innerHTML="";
   menus[s.menu].forEach(c=>{
     const ts=c.tasks.filter(Boolean); if(!ts.length) return;
     o.append(el("h3",{className:"grp",textContent:c.name||"Untitled"}));
-    ts.forEach(t=>o.append(el("button",{className:"opt",textContent:t,onclick:()=>{setTask(s.key,t);closeSheet();}})));
+    ts.forEach(t=>o.append(el("button",{className:"opt",textContent:t,onclick:()=>{setTask(s.key,t,k,+$("repeatSel").value);closeSheet();}})));
   });
   $("custom").value="";
   $("sheet").classList.add("open");
 }
-function closeSheet(){ $("sheet").classList.remove("open"); pickingSlot=null; }
+function closeSheet(){ $("sheet").classList.remove("open"); pickingSlot=null; pickingDay=null; }
+$("clearSlot").onclick=()=>{ if(pickingSlot){ clearSlot(pickingSlot.key,pickingDay); closeSheet(); } };
 $("closeSheet").onclick=closeSheet;
 $("sheet").addEventListener("click",e=>{ if(e.target.id==="sheet") closeSheet(); });
-$("useCustom").onclick=()=>{ const v=$("custom").value.trim(); if(v&&pickingSlot){ setTask(pickingSlot.key,v); closeSheet(); } };
+$("useCustom").onclick=()=>{ const v=$("custom").value.trim(); if(v&&pickingSlot){ setTask(pickingSlot.key,v,pickingDay,+$("repeatSel").value); closeSheet(); } };
 $("custom").addEventListener("keydown",e=>{ if(e.key==="Enter") $("useCustom").click(); });
 
 /* ---------- list editor ---------- */
@@ -310,7 +425,7 @@ $("resetLists").onclick=()=>{
 
 /* ---------- backup ---------- */
 $("exportBtn").onclick=()=>{
-  const blob=new Blob([JSON.stringify({app:"daily-three",version:1,savedAt:new Date().toISOString(),menus,days},null,2)],{type:"application/json"});
+  const blob=new Blob([JSON.stringify({app:"daily-three",version:2,savedAt:new Date().toISOString(),menus,days,repeats},null,2)],{type:"application/json"});
   const a=el("a",{href:URL.createObjectURL(blob),download:`daily-three-backup-${todayKey()}.json`});
   document.body.append(a); a.click(); a.remove();
   setTimeout(()=>URL.revokeObjectURL(a.href),5000);
@@ -322,7 +437,7 @@ $("importFile").onchange=async e=>{
     const data=JSON.parse(await f.text());
     if(data.app!=="daily-three"||!data.menus||!data.days) throw new Error();
     if(!confirm("Replace everything on this phone with this backup?")) return;
-    menus=data.menus; days=data.days; saveMenus(); saveDays();
+    menus=data.menus; days=data.days; repeats=data.repeats||[]; saveMenus(); saveDays(); saveRepeats();
     renderToday(); renderEditor(); toast("Backup restored");
   }catch(err){ toast("That file isn't a Daily Three backup."); }
   e.target.value="";
